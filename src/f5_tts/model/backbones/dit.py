@@ -130,6 +130,9 @@ class DiT(nn.Module):
 
         self.checkpoint_activations = checkpoint_activations
 
+        # Precompute rotary embeddings
+        self.precomputed_rope = {}
+
     def ckpt_wrapper(self, module):
         # https://github.com/chuanyangjin/fast-DiT/blob/main/models.py
         def ckpt_forward(*inputs):
@@ -157,7 +160,10 @@ class DiT(nn.Module):
         text_embed = self.text_embed(text, seq_len, drop_text=drop_text)
         x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond)
 
-        rope = self.rotary_embed.forward_from_seq_len(seq_len)
+        # Precompute rotary embeddings if not already done
+        if seq_len not in self.precomputed_rope:
+            self.precomputed_rope[seq_len] = self.rotary_embed.forward_from_seq_len(seq_len)
+        rope = self.precomputed_rope[seq_len]
 
         if self.long_skip_connection is not None:
             residual = x

@@ -49,41 +49,44 @@ class F5TTS:
 
             self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-        # Load models
-        self.load_vocoder_model(vocoder_name, local_path=local_path, hf_cache_dir=hf_cache_dir)
-        self.load_ema_model(
-            model_type, ckpt_file, vocoder_name, vocab_file, ode_method, use_ema, hf_cache_dir=hf_cache_dir
-        )
+        # Initialize model attributes
+        self.vocoder = None
+        self.ema_model = None
+
+        # Cache for preprocessed text and audio
+        self.preprocessed_cache = {}
 
     def load_vocoder_model(self, vocoder_name, local_path=None, hf_cache_dir=None):
-        self.vocoder = load_vocoder(vocoder_name, local_path is not None, local_path, self.device, hf_cache_dir)
+        if self.vocoder is None:
+            self.vocoder = load_vocoder(vocoder_name, local_path is not None, local_path, self.device, hf_cache_dir)
 
     def load_ema_model(self, model_type, ckpt_file, mel_spec_type, vocab_file, ode_method, use_ema, hf_cache_dir=None):
-        if model_type == "F5-TTS":
-            if not ckpt_file:
-                if mel_spec_type == "vocos":
+        if self.ema_model is None:
+            if model_type == "F5-TTS":
+                if not ckpt_file:
+                    if mel_spec_type == "vocos":
+                        ckpt_file = str(
+                            cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors", cache_dir=hf_cache_dir)
+                        )
+                    elif mel_spec_type == "bigvgan":
+                        ckpt_file = str(
+                            cached_path("hf://SWivid/F5-TTS/F5TTS_Base_bigvgan/model_1250000.pt", cache_dir=hf_cache_dir)
+                        )
+                model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+                model_cls = DiT
+            elif model_type == "E2-TTS":
+                if not ckpt_file:
                     ckpt_file = str(
-                        cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors", cache_dir=hf_cache_dir)
+                        cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.safetensors", cache_dir=hf_cache_dir)
                     )
-                elif mel_spec_type == "bigvgan":
-                    ckpt_file = str(
-                        cached_path("hf://SWivid/F5-TTS/F5TTS_Base_bigvgan/model_1250000.pt", cache_dir=hf_cache_dir)
-                    )
-            model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-            model_cls = DiT
-        elif model_type == "E2-TTS":
-            if not ckpt_file:
-                ckpt_file = str(
-                    cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.safetensors", cache_dir=hf_cache_dir)
-                )
-            model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
-            model_cls = UNetT
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
+                model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
+                model_cls = UNetT
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
 
-        self.ema_model = load_model(
-            model_cls, model_cfg, ckpt_file, mel_spec_type, vocab_file, ode_method, use_ema, self.device
-        )
+            self.ema_model = load_model(
+                model_cls, model_cfg, ckpt_file, mel_spec_type, vocab_file, ode_method, use_ema, self.device
+            )
 
     def transcribe(self, ref_audio, language=None):
         return transcribe(ref_audio, language)
@@ -121,7 +124,23 @@ class F5TTS:
         seed_everything(seed)
         self.seed = seed
 
-        ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text, device=self.device)
+        # Check if vocoder model is loaded
+        if self.vocoder is None:
+            self.load_vocoder_model(self.mel_spec_type)
+
+        # Check if EMA model is loaded
+        if self.ema_model is None:
+            self.load_ema_model(
+                "F5-TTS", "", self.mel_spec_type, "", "euler", True
+            )
+
+        # Check if preprocessed data is cached
+        cache_key = (ref_file, ref_text)
+        if cache_key in self.preprocessed_cache:
+            ref_file, ref_text = self.preprocessed_cache[cache_key]
+        else:
+            ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text, device=self.device)
+            self.preprocessed_cache[cache_key] = (ref_file, ref_text)
 
         wav, sr, spect = infer_process(
             ref_file,
