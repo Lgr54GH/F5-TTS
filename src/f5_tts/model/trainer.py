@@ -128,6 +128,9 @@ class Trainer:
             self.optimizer = AdamW(model.parameters(), lr=learning_rate)
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
 
+        # Initialize GradScaler for mixed precision training
+        self.scaler = torch.cuda.amp.GradScaler()
+
     @property
     def is_main(self):
         return self.accelerator.is_main_process
@@ -303,15 +306,18 @@ class Trainer:
                         dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
                         self.accelerator.log({"duration loss": dur_loss.item()}, step=global_step)
 
-                    loss, cond, pred = self.model(
-                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
-                    )
-                    self.accelerator.backward(loss)
+                    with torch.cuda.amp.autocast():
+                        loss, cond, pred = self.model(
+                            mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
+                        )
+
+                    self.scaler.scale(loss).backward()
 
                     if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
-                    self.optimizer.step()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
 
